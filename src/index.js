@@ -1,3 +1,8 @@
+// NOTE: SOME OF THE LOGIC FROM THIS BACKEND WILL BE RE-WRITTEN ON THE SMARTCONTRACT SIDE AND REMOVED HERE
+// THIS IS TO ALLOW SEEMLESS INTERACTION FROM THE SMART CONTRACT TO THE BACKEND.
+
+
+
 import {hexToString, stringToHex} from "viem";
 
 const { ethers } = require("ethers");
@@ -9,9 +14,9 @@ let users = []
 let total_users = 0
 
 
-  function add_or_update_user(cryptopair, amount, cryptoprice, address){
+  function add_or_update_user(cryptopair, amount, cryptoprice, sender){
     
-    const userIndex = users.findIndex(user => user.address === address)
+    const userIndex = users.findIndex(user => user.sender === sender)
     const date = Date.now();
 
     const newEntry = {
@@ -19,61 +24,133 @@ let total_users = 0
       amount : amount,
       date : date,
       cryptoprice: cryptoprice,
-      address : address
+      sender : sender
     };
 
     if (userIndex !== -1){
       users[userIndex].amount += amount;
-      users[userIndex].data = date;
+      users[userIndex].date = date;
       
-      console.log(`Updated user of address ${address} for ${cryptopair}.`)
+      console.log(`Updated user of address ${sender} for ${cryptopair}.`)
+
+      return {success: true, payload: newEntry}
+
     }else {
       users.push(newEntry);
-      console.log(`Added new user of address ${address}.`);
+      console.log(`Added new user of address ${sender} with cryptopair ${cryptopair}`);
       total_users += 1;
+
+      return {success: true, payload: newEntry}
     }
   }
 
+    function retrieve_user(sender){
+      const user = users.find(user => user.sender === sender)
+      if (user){
+        return user
+      }else{
+        return null;
+      }
+    }
 
+    function remove_user(sender){
+      const userIndex = users.findIndex(user => user.sender === sender);
+      if (userIndex !== -1){
+        users.splice(userIndex, 1)
+        total_users += 1
+        console.log(`Removed user is ${sender}`)
+      }  
+
+    }
+
+
+    //////  HANDLE ADVANCE
 async function handle_advance(data) {
   console.log("Received Inputs : " + JSON.stringify(data));
 
   //const { cryptopair, amount, date, cryptoprice, address} = data;
   const metadata = data["metadata"]
-  const sender = getAddress(metadata.msg_sender)
-  const date = Date.now()
-  const cryptopair = data["cryptopair"]
-  const amount = data["amount"];
+  const inputPayload = data["payload"]
+  const payload_str = hexToString(inputPayload)
 
+  if(!metadata || !metadata["msg_sender"]){
+
+    console.error("Missing metadata or the sender information")
+    return "reject";
+  }
+
+  const sender = metadata["msg_sender"]
+  if(!sender){
+    console.error("Sender address missing")
+    return "reject"
+  }
+  
+  const date = Date.now()
+  const cryptopair = payload_str["cryptopair"]
+  const amount = payload_str["amount"]
+  const cryptoprice = payload_str["cryptoprice"]
+
+  let input = data.payload
+  let str = Buffer.from(input.substr(2), "hex").toString("utf8");
+
+  let json 
+  try{
+    json = JSON.parse(str)
+  }catch(parseError){
+    console.error("Failed to parse JSON", parseError)
+
+    return "reject"
+  }
 
   try{
 
-  if (!cryptopair || !amount || !date || !cryptoprice ){
-    
-    throw("All fields are required")
-    process.exit(1)
-  
-  }
-    let input = data.payload
-    let str = Buffer.from(input.substr(2), "hex").toString("utf8");
-    let json = JSON.parse(str);
-
-    if (json.method === "add_user"){
-    let notice = add_or_update_user(json.cryptopair, BigInt(json.amount), json.date, json.cryptoprice, json.sender);
-      console.log(`the user details are ${notice}`)
-    await fetch(rollup_server + "notice", {
+ if(json.method === "add_user"){
+  //  HANDLE NOTICE ----> USER UPDATE
+    await fetch(rollup_server + "/notice", {
       method : "POST",
       headers: {
         "Content-Type" : "application/json"
       },
-      body : JSON.stringify({ payload: notice.payload})
+      body : JSON.stringify({ payload: inputPayload})
     })
+
+    return "accept"
+
+
+    //HANDLE REPORT ----> USER RETRIVAL
   }else if (json.method === "retrieve_user"){
+    // {"method" : "retrieve_user", "sender" : "" } 
+    const user = retrieve_user(sender);
+
+    if (user){
+      const hexPayload = '0x' + Buffer.from(JSON.stringify(user), 'utf-8').toString('hex')
+    await fetch(rollup_server + "/report", {
+      method : "POST",
+      headers: {
+        "Content-Type" : "application/json"
+      },
+      body: JSON.stringify({payload: hexPayload})
+     // body: JSON.stringify({payload: stringToHex(JSON.stringify(user))})
+    })
+    return "accept"
+
+  }else {
+    const error = `User with address ${json.sender} not found`
+
+    await fetch (rollup_server + "/report", {
+      method : "POST",
+      headers : {
+        "Content-Type" : "application/json"
+      },
+      body: JSON.stringify({payload : error})
+    })
+    return "reject"
+  }
     
   }
 
-  }catch (err){
-    const error = viem.stringToHex(`Error:${e}`)
+  }catch (e){
+    const error = stringToHex(`Error:${e}`)
 
     await fetch(rollup_server + "/report", {
       method: "POST",
@@ -84,11 +161,9 @@ async function handle_advance(data) {
         payload: error
       }),
     });
-    return reject
+    return "reject";
 
   }
-
-
 
 
 
@@ -117,19 +192,6 @@ async function handle_inspect(data) {
     },
     body : JSON.stringify({ payload : stringToHex(responseObject)})
   })
-
-  // if (users.includes(!user)){
-  //   let new_user = user_details(json.CryptoPair, json.Amount, json.Date, json.CryptoPrice, json.address);
-    
-  //   let notice = await fetch( rollup_server + "/notice", {
-  //     method : "POST",
-  //     headers : {
-  //       "Content-Type" : "application/json", 
-  //     },
-  //     body: JSON.stringify({payload : notice.payload })
-  //   })
-  // }
-  //   return "accept";
   
 
   return "accept";
